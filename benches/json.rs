@@ -19,6 +19,7 @@ use nom::{
   IResult, Parser,
 };
 
+use std::char;
 use std::collections::HashMap;
 
 #[derive(Debug, PartialEq, Clone)]
@@ -35,31 +36,46 @@ fn boolean(input: &str) -> IResult<&str, bool> {
   alt((value(false, tag("false")), value(true, tag("true"))))(input)
 }
 
+fn escaped_char(input: &str) -> IResult<&str, char> {
+  map_res(anychar, |c| {
+    Ok(match c {
+      '"' | '\\' | '/' => c,
+      'b' => '\x08',
+      'f' => '\x0C',
+      'n' => '\n',
+      'r' => '\r',
+      't' => '\t',
+      _ => return Err(()),
+    })
+  })(input)
+}
+
+fn unicode_escape(input: &str) -> IResult<&str, u16> {
+  preceded(char('u'), map_res(
+    take(4usize),
+    |s| u16::from_str_radix(s, 16),
+  ))(input)
+}
+
+fn unicode_char(input: &str) -> IResult<&str, char> {
+  let (input, code_point) = unicode_escape(input)?;
+  if let Some(c) = char::from_u32(code_point as u32) {
+    return Ok((input, c));
+  }
+
+  preceded(char('\\'), map_res(unicode_escape, move |code_point2| {
+    // `unwrap()` can't fail because there is at least 1 `u16` of input
+    char::decode_utf16([code_point, code_point2].iter().copied()).next().unwrap()
+  }))(input)
+}
+
 fn character(input: &str) -> IResult<&str, char> {
   let (input, c) = none_of("\"")(input)?;
-  if c == '\\' {
-    alt((
-      map_res(anychar, |c| {
-        Ok(match c {
-          '"' | '\\' | '/' => c,
-          'b' => '\x08',
-          'f' => '\x0C',
-          'n' => '\n',
-          'r' => '\r',
-          't' => '\t',
-          _ => return Err(()),
-        })
-      }),
-      map(
-        map_res(preceded(char('u'), take(4usize)), |s| {
-          u16::from_str_radix(s, 16)
-        }),
-        |c| unsafe { std::char::from_u32_unchecked(c as u32) },
-      ),
-    ))(input)
-  } else {
-    Ok((input, c))
+  if c != '\\' {
+    return Ok((input, c));
   }
+
+  alt((escaped_char, unicode_char))(input)
 }
 
 fn string(input: &str) -> IResult<&str, String> {
